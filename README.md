@@ -19,8 +19,8 @@ all-in-sight/
 | フォルダ | 役割 | 担当 |
 |----------|------|------|
 | `server/` | APIサーバー。ハンドデータの受信・保存・返却 | けいすけ |
-| `android/` | ハンドデータをサーバーに送信するアプリ | メンバーA |
-| `web/` | サーバーのデータを画面に表示する管理者アプリ | メンバーB |
+| `android/` | ハンドデータをサーバーに送信するアプリ | ゆうま |
+| `web/` | サーバーのデータを画面に表示する管理者アプリ | かんた |
 
 ---
 
@@ -45,7 +45,7 @@ all-in-sight/
 | コンポーネント | 技術 |
 |----------------|------|
 | サーバー | Python / FastAPI / SQLite |
-| Androidアプリ | Kotlin / Jetpack Compose |
+| Androidアプリ | Kotlin(Java) / Jetpack Compose(どっちでも良い) |
 | 管理者Webアプリ | HTML / JavaScript |
 | インフラ | Railway |
 # all-in-sight
