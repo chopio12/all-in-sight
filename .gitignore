@@ -35,6 +35,10 @@ google-services.json
 
 # server
 *.db
+server/venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
 
 # MacOS
 .DS_Store
