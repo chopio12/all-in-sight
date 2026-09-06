@@ -7,7 +7,7 @@ from datetime import datetime
 
 app = FastAPI(title="ポーカー記録システム", version="0.2")
 
-DB_PATH = "poker.db"
+DB_PATH = "../poker.db"
 
 # ─────────────────────────────────────────
 # DB初期化

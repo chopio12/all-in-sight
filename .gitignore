@@ -40,5 +40,10 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 
+# Go server build and test output
+server/go/server
+server/go/server.test
+server/go/coverage.out
+
 # MacOS
 .DS_Store
