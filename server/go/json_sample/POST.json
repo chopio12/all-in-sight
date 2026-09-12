@@ -1,0 +1,9 @@
+{
+    "player_id":"player-1",
+    "position":"BTN",
+    "cards":
+    [
+    {"rank":"A","suit":"s"},
+    {"rank":"K","suit":"h"}
+    ]
+}

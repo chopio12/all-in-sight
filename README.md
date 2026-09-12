@@ -32,9 +32,10 @@ all-in-sight/
 
 ## 開発の始め方
 
-各コンポーネントのセットアップ手順は、それぞれのフォルダ内の `README.md` を参照。
+各コンポーネントのセットアップ手順は、それぞれのフォルダ内の README を参照。
 
-- [サーバーのセットアップ](server/README.md)
+- [Go サーバーのセットアップ](server/go/README.md)
+- [Python サーバーのセットアップ](server/python/README.md)
 - Android のセットアップ（準備中）
 - Web のセットアップ（準備中）
 
@@ -44,7 +45,7 @@ all-in-sight/
 
 | コンポーネント | 技術 |
 |----------------|------|
-| サーバー | Python / FastAPI / SQLite |
+| サーバー | Go / SQLite、Python / FastAPI / SQLite |
 | Androidアプリ | Kotlin(Java) / Jetpack Compose(どっちでも良い) |
 | 管理者Webアプリ | HTML / JavaScript |
 | インフラ | Railway |

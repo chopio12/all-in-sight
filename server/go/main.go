@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	// database/sql は、SQLite などのデータベースを操作する共通APIです。
 	"database/sql"
 	// encoding/json は、JSONとGoの構造体を相互に変換します。
@@ -8,6 +9,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"strconv"
 	"time"
 
 	// SQLiteドライバをdatabase/sqlへ登録します。直接は呼ばないため、名前を _ にします。
@@ -15,8 +17,8 @@ import (
 )
 
 const (
-	// GoとPythonが共通で使うSQLiteファイルへの、goディレクトリから見た相対パスです。
-	dbPath = "../poker.db"
+	// Go専用SQLiteファイルへの、goディレクトリから見た相対パスです。
+	dbPath = "../poker-go.db"
 	// HTTPサーバーが待ち受けるポートです。Python版と同時に起動できるよう8001を使います。
 	addr = ":8001"
 )
@@ -30,13 +32,25 @@ type card struct {
 
 // handRequest は、POST /hands のリクエスト本文の形です。
 type handRequest struct {
-	Cards []card `json:"cards"`
+	PlayerID string `json:"player_id"`
+	Position string `json:"position"`
+	Cards    []card `json:"cards"`
 }
 
 // handResponse は、作成・取得したハンドをクライアントに返すときの形です。
 type handResponse struct {
 	ID        int64  `json:"id"`
+	SessionID int64  `json:"session_id"`
+	PlayerID  string `json:"player_id"`
+	Position  string `json:"position"`
 	Cards     []card `json:"cards"`
+	CreatedAt string `json:"created_at"`
+}
+
+// sessionResponse は、ポーカーセッションの状態をクライアントへ返す形です。
+type sessionResponse struct {
+	ID        int64  `json:"id"`
+	Status    string `json:"status"`
 	CreatedAt string `json:"created_at"`
 }
 
@@ -46,6 +60,7 @@ type server struct {
 }
 
 func main() {
+	fmt.Printf("Starting server on %s\n", addr)
 	// SQLiteデータベースに接続します。ファイルがなければSQLiteが作成します。
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
@@ -62,9 +77,20 @@ func main() {
 	app := &server{db: db}
 	// muxは、HTTPメソッドとURLパスを見て呼び出す関数を振り分けるルーターです。
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /health", app.healthCheck)
-	mux.HandleFunc("GET /hands", app.getHands)
-	mux.HandleFunc("POST /hands", app.createHand)
+	mux.HandleFunc("/health", app.healthCheck)
+	mux.HandleFunc("/sessions/start", app.startSession)
+	mux.HandleFunc("/sessions/end", app.endSession)
+	mux.HandleFunc("/sessions/current", app.getCurrentSession)
+	mux.HandleFunc("/hands", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			app.getHands(w, r)
+		case http.MethodPost:
+			app.createHand(w, r)
+		default:
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		}
+	})
 
 	// HTTPサーバーを起動します。この行はサーバーを停止するまで戻りません。
 	log.Printf("Poker API listening on http://localhost%s", addr)
@@ -72,12 +98,32 @@ func main() {
 }
 
 func initDB(db *sql.DB) error {
-	// IF NOT EXISTS があるため、すでにテーブルがあってもエラーにはなりません。
+	// セッションと手札を分け、手札は必ず1つのセッションに所属させます。
 	_, err := db.Exec(`
-		CREATE TABLE IF NOT EXISTS hands (
+		PRAGMA foreign_keys = ON;
+
+		CREATE TABLE IF NOT EXISTS poker_sessions (
 			id         INTEGER PRIMARY KEY AUTOINCREMENT,
-			cards      TEXT    NOT NULL,
+			status     TEXT    NOT NULL CHECK (status IN ('active', 'closed')),
 			created_at TEXT    NOT NULL DEFAULT (datetime('now'))
+		);
+
+		CREATE UNIQUE INDEX IF NOT EXISTS one_active_poker_session
+		ON poker_sessions (status)
+		WHERE status = 'active';
+
+		CREATE TABLE IF NOT EXISTS hands (
+			id            INTEGER PRIMARY KEY AUTOINCREMENT,
+			session_id    INTEGER NOT NULL,
+			player_id     TEXT    NOT NULL,
+			position      TEXT    NOT NULL,
+			hand_number_1 TEXT    NOT NULL,
+			hand_number_2 TEXT    NOT NULL,
+			hand_sute_1   TEXT    NOT NULL,
+			hand_sute_2   TEXT    NOT NULL,
+			created_at    TEXT    NOT NULL DEFAULT (datetime('now')),
+			FOREIGN KEY (session_id) REFERENCES poker_sessions(id),
+			UNIQUE (session_id, position)
 		)
 	`)
 	return err
@@ -86,6 +132,75 @@ func initDB(db *sql.DB) error {
 func (app *server) healthCheck(w http.ResponseWriter, _ *http.Request) {
 	// サーバーが起動しているかを確認するため、固定のJSONを返します。
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (app *server) startSession(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	createdAt := time.Now().UTC().Format(time.RFC3339)
+	result, err := app.db.Exec(
+		"INSERT INTO poker_sessions (status, created_at) VALUES ('active', ?)",
+		createdAt,
+	)
+	if err != nil {
+		writeError(w, http.StatusConflict, "an active session already exists")
+		return
+	}
+	id, err := result.LastInsertId()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to get session ID")
+		return
+	}
+	writeJSON(w, http.StatusCreated, sessionResponse{ID: id, Status: "active", CreatedAt: createdAt})
+}
+
+func (app *server) endSession(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	result, err := app.db.Exec("UPDATE poker_sessions SET status = 'closed' WHERE status = 'active'")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to end session")
+		return
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to end session")
+		return
+	}
+	if updated == 0 {
+		writeError(w, http.StatusNotFound, "no active session")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "closed"})
+}
+
+func (app *server) getCurrentSession(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	var session sessionResponse
+	err := app.db.QueryRow(`
+		SELECT id, status, created_at
+		FROM poker_sessions
+		WHERE status = 'active'
+	`).Scan(&session.ID, &session.Status, &session.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "no active session")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load active session")
+		return
+	}
+	writeJSON(w, http.StatusOK, session)
 }
 
 func (app *server) createHand(w http.ResponseWriter, r *http.Request) {
@@ -102,16 +217,36 @@ func (app *server) createHand(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if request.PlayerID == "" {
+		writeError(w, http.StatusUnprocessableEntity, "player_id is required")
+		return
+	}
+	if request.Position == "" {
+		writeError(w, http.StatusUnprocessableEntity, "position is required")
+		return
+	}
+
 	// カードが2枚か、rankとsuitが許可された値かを確認します。
 	if err := validateCards(request.Cards); err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
 
-	// SQLiteにはカードの配列をJSON文字列として保存します。
-	cardsJSON, err := json.Marshal(request.Cards)
+	sessionID, err := app.getActiveSessionID()
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusConflict, "no active session")
+		return
+	}
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to encode cards")
+		writeError(w, http.StatusInternalServerError, "failed to load active session")
+		return
+	}
+	if err := app.validateCardsUnusedInSession(sessionID, request.Cards); err != nil {
+		if errors.Is(err, errCardAlreadyUsed) {
+			writeError(w, http.StatusConflict, "a card is already used in this session")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to validate cards")
 		return
 	}
 
@@ -119,9 +254,8 @@ func (app *server) createHand(w http.ResponseWriter, r *http.Request) {
 	createdAt := time.Now().UTC().Format(time.RFC3339)
 	// ? は値を安全に渡すためのプレースホルダーです。SQL文へ値を直接つなげません。
 	result, err := app.db.Exec(
-		"INSERT INTO hands (cards, created_at) VALUES (?, ?)",
-		string(cardsJSON),
-		createdAt,
+		"INSERT INTO hands (session_id, player_id, position, hand_number_1, hand_number_2, hand_sute_1, hand_sute_2, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+		sessionID, request.PlayerID, request.Position, request.Cards[0].Rank, request.Cards[1].Rank, request.Cards[0].Suit, request.Cards[1].Suit, createdAt,
 	)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to save hand")
@@ -137,14 +271,32 @@ func (app *server) createHand(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusCreated, handResponse{
 		ID:        id,
+		SessionID: sessionID,
+		PlayerID:  request.PlayerID,
+		Position:  request.Position,
 		Cards:     request.Cards,
 		CreatedAt: createdAt,
 	})
 }
 
-func (app *server) getHands(w http.ResponseWriter, _ *http.Request) {
+func (app *server) getHands(w http.ResponseWriter, r *http.Request) {
+	query := `
+		SELECT id, session_id, player_id, position, hand_number_1, hand_number_2, hand_sute_1, hand_sute_2, created_at
+		FROM hands
+	`
+	var queryArgs []any
+	if sessionIDValue := r.URL.Query().Get("session_id"); sessionIDValue != "" {
+		sessionID, err := strconv.ParseInt(sessionIDValue, 10, 64)
+		if err != nil || sessionID < 1 {
+			writeError(w, http.StatusUnprocessableEntity, "session_id must be a positive integer")
+			return
+		}
+		query += "WHERE session_id = ?\n"
+		queryArgs = append(queryArgs, sessionID)
+	}
 	// IDの大きい順、つまり新しく保存したハンドから取得します。
-	rows, err := app.db.Query("SELECT id, cards, created_at FROM hands ORDER BY id DESC")
+	query += "ORDER BY id DESC"
+	rows, err := app.db.Query(query, queryArgs...)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load hands")
 		return
@@ -155,17 +307,13 @@ func (app *server) getHands(w http.ResponseWriter, _ *http.Request) {
 	hands := make([]handResponse, 0)
 	for rows.Next() {
 		var hand handResponse
-		var cardsJSON string
 		// SQLの各列をGoの変数へ読み取ります。& は変数に値を書き込む指定です。
-		if err := rows.Scan(&hand.ID, &cardsJSON, &hand.CreatedAt); err != nil {
+		var firstRank, secondRank, firstSuit, secondSuit string
+		if err := rows.Scan(&hand.ID, &hand.SessionID, &hand.PlayerID, &hand.Position, &firstRank, &secondRank, &firstSuit, &secondSuit, &hand.CreatedAt); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to read hand")
 			return
 		}
-		// DB内のJSON文字列を、レスポンス用のカード配列へ戻します。
-		if err := json.Unmarshal([]byte(cardsJSON), &hand.Cards); err != nil {
-			writeError(w, http.StatusInternalServerError, "stored hand contains invalid cards")
-			return
-		}
+		hand.Cards = []card{{Rank: firstRank, Suit: firstSuit}, {Rank: secondRank, Suit: secondSuit}}
 		hands = append(hands, hand)
 	}
 	if err := rows.Err(); err != nil {
@@ -174,6 +322,38 @@ func (app *server) getHands(w http.ResponseWriter, _ *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, hands)
+}
+
+func (app *server) getActiveSessionID() (int64, error) {
+	var sessionID int64
+	err := app.db.QueryRow("SELECT id FROM poker_sessions WHERE status = 'active'").Scan(&sessionID)
+	return sessionID, err
+}
+
+var errCardAlreadyUsed = errors.New("card already used in session")
+
+func (app *server) validateCardsUnusedInSession(sessionID int64, cards []card) error {
+	for _, card := range cards {
+		var exists bool
+		err := app.db.QueryRow(`
+			SELECT EXISTS (
+				SELECT 1
+				FROM hands
+				WHERE session_id = ?
+				  AND (
+					(hand_number_1 = ? AND hand_sute_1 = ?)
+					OR (hand_number_2 = ? AND hand_sute_2 = ?)
+				  )
+			)
+		`, sessionID, card.Rank, card.Suit, card.Rank, card.Suit).Scan(&exists)
+		if err != nil {
+			return err
+		}
+		if exists {
+			return errCardAlreadyUsed
+		}
+	}
+	return nil
 }
 
 func validateCards(cards []card) error {
@@ -188,6 +368,9 @@ func validateCards(cards []card) error {
 		if !isValidSuit(card.Suit) {
 			return errors.New("suit must be one of s, h, d, c")
 		}
+	}
+	if cards[0].Rank == cards[1].Rank && cards[0].Suit == cards[1].Suit {
+		return errors.New("cards must not contain the same card twice")
 	}
 	return nil
 }
